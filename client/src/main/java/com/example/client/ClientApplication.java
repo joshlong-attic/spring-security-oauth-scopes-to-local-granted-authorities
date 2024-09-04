@@ -4,11 +4,13 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.authority.mapping.GrantedAuthoritiesMapper;
+import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.oauth2.core.oidc.user.OidcUserAuthority;
 import org.springframework.security.oauth2.core.user.OAuth2UserAuthority;
 import org.springframework.security.provisioning.JdbcUserDetailsManager;
@@ -22,6 +24,7 @@ import java.security.Principal;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 @SpringBootApplication
 public class ClientApplication {
@@ -35,6 +38,14 @@ public class ClientApplication {
         return new JdbcUserDetailsManager(dataSource);
     }
 
+    private final Map<String, UserDetails> users = new ConcurrentHashMap<>();
+
+
+    @Scheduled(cron = "0 */5 * * * *")
+    void removeOldIUsers() {
+        this.users.clear();
+    }
+    
     @Bean
     GrantedAuthoritiesMapper userAuthoritiesMapper(JdbcClient jdbcClient, JdbcUserDetailsManager jdbcUserDetailsManager) {
         return (authorities) -> {
@@ -42,27 +53,28 @@ public class ClientApplication {
 
             authorities.forEach(authority -> {
                 if (authority instanceof OidcUserAuthority oidcUserAuthority) {
-
-
                     var userInfo = oidcUserAuthority.getUserInfo();
                     var username = userInfo.getSubject();
 
-                    jdbcClient.sql("""
-                                        insert into users (username, password, enabled) values (?,?,?)
-                                        on conflict do nothing ;
-                                    """)
-                            .params(username, UUID.randomUUID(), true)
-                            .update();
-
-                    jdbcClient.sql("""
-                                        insert into authorities  (username, authority) values (?,?)
-                                        on conflict do nothing ;
-                                    """)
-                            .params(username, "USER")
-                            .update();
-
                     // 
-                    var userDetails = jdbcUserDetailsManager.loadUserByUsername(username);
+                    var userDetails = this.users.computeIfAbsent(username, un -> {
+                        jdbcClient.sql("""
+                                            insert into users (username, password, enabled) values (?,?,?)
+                                            on conflict do nothing ;
+                                        """)
+                                .params(username, UUID.randomUUID(), true)
+                                .update();
+
+                        jdbcClient.sql("""
+                                            insert into authorities  (username, authority) values (?,?)
+                                            on conflict do nothing ;
+                                        """)
+                                .params(username, "USER")
+                                .update();
+
+                        return jdbcUserDetailsManager.loadUserByUsername(username);
+                    });
+                    
                     var roles = userDetails.getAuthorities()
                             .stream()
                             .map(ga -> new SimpleGrantedAuthority("ROLE_" + ga.getAuthority()))
@@ -70,11 +82,8 @@ public class ClientApplication {
                     mappedAuthorities.addAll(roles);
                 } // 
                 else if (authority instanceof OAuth2UserAuthority oauth2UserAuthority) {
-
                     //todo
                     // var userAttributes = oauth2UserAuthority.getAttributes();
-
-
                 }
             });
 
